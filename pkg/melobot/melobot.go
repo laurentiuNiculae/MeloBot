@@ -5,11 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"math/rand"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/laurentiuNiculae/MeloBot/pkg/log"
@@ -23,61 +20,82 @@ const (
 )
 
 type MeloBot struct {
-	Pass    string
-	Nick    string
-	Channel string
-	Conn    *tls.Conn
-	Log     log.MeloLog
-
+	Pass     string
+	Nick     string
+	Channel  string
+	Conn     *tls.Conn
+	Log      log.MeloLog
+	State    BotState
 	Incoming chan *irc.Message
+
+	reconectDelay time.Duration
 }
 
 func New(pass, nick, channel string, log log.MeloLog) (*MeloBot, error) {
-	conn, err := tls.Dial("tcp", TwitchIRSAddress, nil)
-	if err != nil {
-		fmt.Println("Error tdl Dial")
-
-		return nil, err
-	}
-
 	return &MeloBot{
-		Pass:     pass,
-		Nick:     nick,
-		Channel:  channel,
-		Conn:     conn,
-		Log:      log,
-		Incoming: make(chan *irc.Message),
+		Pass:          pass,
+		Nick:          nick,
+		Channel:       channel,
+		Log:           log,
+		State:         Starting,
+		Incoming:      make(chan *irc.Message),
+		reconectDelay: time.Second,
 	}, nil
 }
 
 func (mb *MeloBot) Start() {
 	ctx := context.Background()
 
-	go mb.ListenReplies(ctx)
+	for {
+		switch mb.State {
+		case Starting:
+			conn, err := tls.Dial("tcp", TwitchIRSAddress, nil)
+			if err != nil {
+				mb.Log.Errorf("Error creating connection, retrying after %v", mb.reconectDelay.String())
+				mb.reconectDelay = mb.reconectDelay * 2
+				mb.State = Starting
 
-	err := mb.SendCredentials(ctx)
-	if err != nil {
-		panic(err)
+				break
+			}
+
+			mb.reconectDelay = time.Second
+			mb.Conn = conn
+
+			go mb.ListenReplies(ctx)
+
+			mb.State = LoggingIn
+		case LoggingIn:
+			err := mb.SendCredentials(ctx)
+			if err != nil {
+				panic(err)
+			}
+
+			err = mb.JoinChannel(ctx)
+			if err != nil {
+				panic(err)
+			}
+
+			mb.State = Serving
+		case Serving:
+			go mb.StartCommandHandler(ctx)
+
+			err := mb.Say("Hello, chat!")
+			if err != nil {
+				panic(err)
+			}
+		case Restarting:
+			ctx.Done()
+			mb.State = Starting
+		default:
+		}
 	}
 
-	err = mb.JoinChannel(ctx)
-	if err != nil {
-		panic(err)
-	}
+	// c := make(chan os.Signal, 10)
+	// signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
-	go mb.StartCommandHandler(ctx)
-
-	err = mb.Say("Hello, chat!")
-	if err != nil {
-		panic(err)
-	}
-
-	c := make(chan os.Signal, 10)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	// wait until we get an interrupt call, then we'll close the main program context
-	<-c
-	ctx.Done()
+	// // wait until we get an interrupt call, then we'll close the main program context
+	// <-c
+	// ctx.Done()
 }
 
 func (mb *MeloBot) StartCommandHandler(ctx context.Context) {
