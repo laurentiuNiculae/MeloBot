@@ -11,7 +11,7 @@ func GetFlags() Flags {
 		credentialsFilePath string
 	)
 
-	flag.StringVar(&credentialsFilePath, "creds-file", "", "if specified, will choose the credentials from this file")
+	flag.StringVar(&credentialsFilePath, "creds", "", "if specified, will choose the credentials from this file")
 
 	flag.Parse()
 
