@@ -1,5 +1,0 @@
-#!/bin/bash
-
-curl -X POST 'https://id.twitch.tv/oauth2/token' \
--H 'Content-Type: application/x-www-form-urlencoded' \
--d 'client_id=9v1qn54zofjqbpqarcq4riz0074fuq&client_secret=7ttttrdnss44w978dyp0o8rkxdeoju&code=raznjw47y78h4juqwul5wjmlvpzwz2&grant_type=authorization_code&redirect_uri=https://localhost:6969'

@@ -1,4 +1,4 @@
-package cmd
+package melobot
 
 import "gopkg.in/irc.v4"
 
