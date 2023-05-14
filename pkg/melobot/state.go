@@ -8,4 +8,7 @@ const (
 	LoggingIn
 	Serving
 	Restarting
+	Closing
 )
+
+type StateChange chan BotState

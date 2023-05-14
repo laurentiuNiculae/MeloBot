@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 
 	"github.com/fatih/color"
 )
@@ -14,7 +15,7 @@ var (
 	brue   = color.New(color.FgHiBlue).SprintFunc()
 	faint  = color.New(color.Faint).SprintFunc()
 
-	infoColor  = color.New(color.FgWhite).SprintFunc()
+	infoColor  = color.New(color.FgHiWhite).SprintFunc()
 	errorColor = color.New(color.FgHiRed).SprintFunc()
 	debugColor = color.New(color.FgHiWhite).SprintFunc()
 )
@@ -23,6 +24,10 @@ type MeloLog struct {
 	infoLog  *log.Logger
 	errorLog *log.Logger
 	debugLog *log.Logger
+
+	mu *sync.Mutex
+
+	Enabled bool
 }
 
 type InfoWriter struct {
@@ -67,29 +72,49 @@ func New(out io.Writer) MeloLog {
 		infoLog:  InfoLog,
 		errorLog: ErrorLog,
 		debugLog: DebugLog,
+		Enabled:  true,
+		mu:       &sync.Mutex{},
 	}
 }
 
 func (l *MeloLog) Info(msg string) {
-	l.infoLog.Output(2, infoColor(msg))
+	if l.Enabled {
+		l.infoLog.Output(2, infoColor(msg))
+	}
 }
 
 func (l *MeloLog) Error(msg string) {
-	l.errorLog.Output(2, errorColor(msg))
+	if l.Enabled {
+		l.errorLog.Output(2, errorColor(msg))
+	}
 }
 
 func (l *MeloLog) Debug(msg string) {
-	l.debugLog.Output(2, debugColor(msg))
+	if l.Enabled {
+		l.debugLog.Output(2, debugColor(msg))
+	}
 }
 
 func (l *MeloLog) Infof(format string, args ...any) {
-	l.infoLog.Output(2, fmt.Sprintf(infoColor(format), args...))
+	if l.Enabled {
+		l.infoLog.Output(2, fmt.Sprintf(infoColor(format), args...))
+	}
 }
 
 func (l *MeloLog) Errorf(format string, args ...any) {
-	l.errorLog.Output(2, fmt.Sprintf(errorColor(format), args...))
+	if l.Enabled {
+		l.errorLog.Output(2, fmt.Sprintf(errorColor(format), args...))
+	}
 }
 
 func (l *MeloLog) Debugf(format string, args ...any) {
-	l.debugLog.Output(2, fmt.Sprintf(debugColor(format), args...))
+	if l.Enabled {
+		l.debugLog.Output(2, fmt.Sprintf(debugColor(format), args...))
+	}
+}
+
+func (l *MeloLog) SetEnabled(boolean bool) {
+	l.mu.Lock()
+	l.Enabled = boolean
+	l.mu.Unlock()
 }

@@ -3,6 +3,7 @@ module github.com/laurentiuNiculae/MeloBot
 go 1.19
 
 require (
+	github.com/avast/retry-go v3.0.0+incompatible
 	github.com/fatih/color v1.15.0
 	gopkg.in/irc.v4 v4.0.0
 )

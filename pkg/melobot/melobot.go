@@ -1,16 +1,23 @@
 package melobot
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"math/rand"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/laurentiuNiculae/MeloBot/pkg/log"
+	retry "github.com/avast/retry-go"
 	"gopkg.in/irc.v4"
+
+	mbErrors "github.com/laurentiuNiculae/MeloBot/pkg/errors"
+	"github.com/laurentiuNiculae/MeloBot/pkg/log"
 )
 
 const (
@@ -28,78 +35,158 @@ type MeloBot struct {
 	State    BotState
 	Incoming chan *irc.Message
 
-	reconectDelay time.Duration
+	StateChange    StateChange
+	RestartCounter *sync.WaitGroup
 }
 
 func New(pass, nick, channel string, log log.MeloLog) (*MeloBot, error) {
 	return &MeloBot{
-		Pass:          pass,
-		Nick:          nick,
-		Channel:       channel,
-		Log:           log,
-		State:         Starting,
-		Incoming:      make(chan *irc.Message),
-		reconectDelay: time.Second,
+		Pass:           pass,
+		Nick:           nick,
+		Channel:        channel,
+		Log:            log,
+		State:          Starting,
+		Incoming:       make(chan *irc.Message, 50),
+		StateChange:    make(StateChange, 2),
+		RestartCounter: &sync.WaitGroup{},
 	}, nil
 }
 
 func (mb *MeloBot) Start() {
-	ctx := context.Background()
+	var (
+		ctx             context.Context
+		cancelContext   context.CancelFunc
+		systemInterrupt = make(chan os.Signal, 10)
+	)
+
+	signal.Notify(systemInterrupt, os.Interrupt)
+
+	mb.StateChange <- Starting
 
 	for {
-		switch mb.State {
-		case Starting:
-			conn, err := tls.Dial("tcp", TwitchIRSAddress, nil)
-			if err != nil {
-				mb.Log.Errorf("Error creating connection, retrying after %v", mb.reconectDelay.String())
-				mb.reconectDelay = mb.reconectDelay * 2
+		select {
+		case newState := <-mb.StateChange:
+			switch newState {
+			case Starting:
+				ctx, cancelContext = context.WithCancel(context.Background())
+
+				err := retry.Do(
+					func() error {
+						conn, err := tls.Dial("tcp", TwitchIRSAddress, nil)
+						if err != nil {
+							mb.Log.Errorf("Error occured while re")
+
+							return err
+						}
+
+						mb.Conn = conn
+
+						return nil
+					},
+					retry.DelayType(retry.BackOffDelay),
+					retry.Context(ctx),
+					retry.Attempts(100),
+				)
+
+				if err != nil {
+					mb.Log.Error("Connection failed, retrying agaain")
+
+					continue
+				}
+
+				go mb.ListenReplies(ctx)
+
+				mb.StateChange <- LoggingIn
+				mb.State = LoggingIn
+			case LoggingIn:
+				err := mb.SendCredentials(ctx)
+				if err != nil {
+					panic(err)
+				}
+
+				err = mb.JoinChannel(ctx)
+				if err != nil {
+					panic(err)
+				}
+
+				mb.StateChange <- Serving
+				mb.State = Serving
+			case Serving:
+				go mb.StartCommandHandler(ctx)
+
+				err := mb.Say("Hello, chat!")
+				if err != nil {
+					panic(err)
+				}
+			case Restarting:
+				cancelContext()
+				mb.RestartCounter.Wait()
+				mb.Log.Info("Melobot is restarting")
+
+				mb.StateChange <- Starting
 				mb.State = Starting
+			case Closing:
+				cancelContext()
+				mb.RestartCounter.Wait()
+				mb.Log.Info("Melobot is closed")
 
-				break
+				os.Exit(0)
+			default:
+				panic("all states cases should be handled")
+			}
+		case <-systemInterrupt:
+			mb.Log.SetEnabled(false)
+
+			reader := bufio.NewReader(os.Stdin)
+
+			var repeatActionSelection bool = true
+
+			fmt.Println("\nChoose action: ")
+			fmt.Println("   - restart (r)")
+			fmt.Println("   - quit (q)")
+
+			for repeatActionSelection {
+				action, err := reader.ReadString('\n')
+				if err != nil {
+					continue
+				}
+
+				action = strings.TrimSpace(action)
+
+				switch action {
+				case "restart", "r":
+					repeatActionSelection = false
+
+					err := mb.Conn.Close()
+					if err != nil {
+						fmt.Println("Failed to restart, try again.")
+						repeatActionSelection = true
+					}
+
+					mb.StateChange <- Restarting
+				case "quit", "q":
+					repeatActionSelection = false
+
+					err := mb.Conn.Close()
+					if err != nil {
+						fmt.Println("Failed to gracefully quit. Force quit.")
+						os.Exit(0)
+					}
+
+					mb.StateChange <- Closing
+				default:
+					fmt.Println("Please retry :)")
+				}
 			}
 
-			mb.reconectDelay = time.Second
-			mb.Conn = conn
-
-			go mb.ListenReplies(ctx)
-
-			mb.State = LoggingIn
-		case LoggingIn:
-			err := mb.SendCredentials(ctx)
-			if err != nil {
-				panic(err)
-			}
-
-			err = mb.JoinChannel(ctx)
-			if err != nil {
-				panic(err)
-			}
-
-			mb.State = Serving
-		case Serving:
-			go mb.StartCommandHandler(ctx)
-
-			err := mb.Say("Hello, chat!")
-			if err != nil {
-				panic(err)
-			}
-		case Restarting:
-			ctx.Done()
-			mb.State = Starting
-		default:
+			mb.Log.SetEnabled(true)
 		}
 	}
-
-	// c := make(chan os.Signal, 10)
-	// signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	// // wait until we get an interrupt call, then we'll close the main program context
-	// <-c
-	// ctx.Done()
 }
 
 func (mb *MeloBot) StartCommandHandler(ctx context.Context) {
 	mb.Log.Debug("Start listening to commands from chat.")
+	mb.RestartCounter.Add(1)
 
 	for {
 		select {
@@ -145,7 +232,8 @@ func (mb *MeloBot) StartCommandHandler(ctx context.Context) {
 
 			continue
 		case <-ctx.Done():
-			mb.Log.Info("X Closing command handler")
+			mb.Log.Debug("Closing command handler")
+			mb.RestartCounter.Done()
 
 			return
 		}
@@ -191,12 +279,18 @@ func (mb *MeloBot) SendIRC(ircMsg *irc.Message) error {
 }
 
 func (mb *MeloBot) ListenReplies(ctx context.Context) {
-	mb.Log.Debug("Starting to listen to replyes.")
+	mb.Log.Info("Starting to listen to replyes.")
+	mb.RestartCounter.Add(1)
 
 	ircReader := irc.NewReader(mb.Conn)
 
 	for {
 		select {
+		case <-ctx.Done():
+			mb.Log.Debug("EXIT: Closing IRC reply listener")
+			mb.RestartCounter.Done()
+
+			return
 		default:
 			ircMsg, err := ircReader.ReadMessage()
 			if err != nil {
@@ -206,20 +300,18 @@ func (mb *MeloBot) ListenReplies(ctx context.Context) {
 			mb.Log.Debugf("%s: %s", ircMsg.Command, ircMsg.Trailing())
 
 			mb.Incoming <- ircMsg
-		case <-ctx.Done():
-			mb.Log.Debug("EXIT: Closing IRC reply listener")
-
-			return
 		}
 	}
 }
 
 func (mb *MeloBot) SendCredentials(ctx context.Context) error {
+	mb.Log.Info("Sending credentials")
+
 	err := mb.SendIRC(&irc.Message{Command: "PASS", Params: []string{mb.Pass}})
 	if err != nil {
 		mb.Log.Error("Error Writing PASS")
 
-		return err
+		return fmt.Errorf("%w : %w", mbErrors.ErrFailedIRCSend, err)
 	}
 
 	err = mb.SendIRC(&irc.Message{Command: "NICK", Params: []string{mb.Nick}})
@@ -243,16 +335,16 @@ func (mb *MeloBot) SendCredentials(ctx context.Context) error {
 
 				return nil
 			case "NOTICE":
-				mb.Log.Error("Connection FAILED")
-
 				if strings.Contains(confirmMsg.String(), "Login authentication failed") {
-					panic("Authentification failed")
+					mb.Log.Error("Connection FAILED because of bad credentials")
+
+					return mbErrors.ErrBadCredentials
 				}
 			}
 		case <-timeout:
 			mb.Log.Error("Connection timeout")
 
-			return fmt.Errorf("login failed")
+			return mbErrors.ErrTimeout
 		case <-ctx.Done():
 			mb.Log.Info("Program is being closed")
 
@@ -262,9 +354,11 @@ func (mb *MeloBot) SendCredentials(ctx context.Context) error {
 }
 
 func (mb *MeloBot) JoinChannel(ctx context.Context) error {
-	_, err := mb.Conn.Write([]byte("JOIN #themelopeus" + "\r\n"))
+	mb.Log.Infof("Joinging channel %s", mb.Channel)
+
+	err := mb.SendIRC(&irc.Message{Command: "JOIN", Params: []string{mb.Channel}})
 	if err != nil {
-		fmt.Println("LOG: Error sending JOIN")
+		mb.Log.Error("Error sending JOIN")
 
 		panic(err)
 	}
@@ -280,13 +374,11 @@ func (mb *MeloBot) JoinChannel(ctx context.Context) error {
 				return nil
 			}
 		case <-timeout:
-			mb.Log.Error("Connection TIMEOUT")
+			mb.Log.Errorf("Joing channel TIMEOUT, make sure the channel '%s' is spelled right or that it exists", mb.Channel)
 
-			return fmt.Errorf("login failed")
+			return mbErrors.ErrTimeout
 		case <-ctx.Done():
 			mb.Log.Error("Program is being closed ")
-
-			fmt.Println("EXIT: Program is being closed")
 
 			return nil
 		}
