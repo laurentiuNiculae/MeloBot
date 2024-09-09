@@ -1,3 +1,3 @@
 #!/bin/bash
 
-go build -o MeloBot ./pkg/cmd/main.go
+go build -o MeloBot ./cmd/main.go

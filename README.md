@@ -1,1 +1,3 @@
 # MeloBot
+
+Twitch bot implementation.
